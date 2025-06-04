@@ -276,10 +276,14 @@ class AIEngine {
     const projectContext = await this.loadProjectContext();
     const fileContext = await this.getRelevantFileContext(userInput);
     const history = agentState.getContextualHistory();
+    const projectStructure = await this.getProjectOverview();
 
     return `
 # PROJECT CONTEXT
 ${projectContext}
+
+# PROJECT STRUCTURE
+${projectStructure}
 
 # RELEVANT FILES
 ${fileContext}
@@ -296,7 +300,102 @@ You are an expert AI coding agent. Respond concisely and practically.
 - Explain your technical decisions
 - Suggest best practices when relevant
 - If modifying files, clearly explain the changes
+- Use the project context and structure to provide relevant answers
 `.trim();
+  }
+
+  static async getProjectOverview() {
+    try {
+      const files = await FileManager.scanProject();
+      const codeFiles = files.filter(file => {
+        const codeExtensions = ['.js', '.ts', '.jsx', '.tsx', '.py', '.java', '.cpp', '.c', '.go', '.rs', '.php', '.rb', '.cs', '.swift', '.kt', '.html', '.css', '.scss', '.vue', '.svelte'];
+        return codeExtensions.includes(file.ext);
+      });
+
+      const techStack = this.detectTechStack(files);
+      
+      let packageInfo = '';
+      if (await FileManager.exists('package.json')) {
+        try {
+          const pkg = JSON.parse(await FileManager.readFile('package.json'));
+          packageInfo = `
+Project: ${pkg.name || 'Unknown'}
+Version: ${pkg.version || 'Unknown'}
+Description: ${pkg.description || 'No description'}`;
+        } catch (error) {
+          packageInfo = '\nProject: package.json found but could not be parsed';
+        }
+      }
+
+      return `
+Files: ${files.length} total, ${codeFiles.length} code files
+Tech Stack: ${techStack.join(', ')}${packageInfo}
+
+Key Directories:
+${this.getKeyDirectories(files)}
+
+Main Files:
+${this.getMainFiles(codeFiles)}`.trim();
+    } catch (error) {
+      return 'Project structure analysis unavailable';
+    }
+  }
+
+  static detectTechStack(files) {
+    const stack = new Set();
+    
+    // Check for common files and patterns
+    const indicators = {
+      'JavaScript/Node.js': files.some(f => f.name === 'package.json'),
+      'TypeScript': files.some(f => f.ext === '.ts' || f.name === 'tsconfig.json'),
+      'React': files.some(f => f.ext === '.jsx' || f.ext === '.tsx'),
+      'Vue.js': files.some(f => f.ext === '.vue'),
+      'Python': files.some(f => f.ext === '.py' || f.name === 'requirements.txt'),
+      'Go': files.some(f => f.ext === '.go' || f.name === 'go.mod'),
+      'Rust': files.some(f => f.ext === '.rs' || f.name === 'Cargo.toml'),
+      'Java': files.some(f => f.ext === '.java' || f.name === 'pom.xml'),
+      'C/C++': files.some(f => f.ext === '.c' || f.ext === '.cpp' || f.ext === '.h'),
+      'PHP': files.some(f => f.ext === '.php'),
+      'Ruby': files.some(f => f.ext === '.rb' || f.name === 'Gemfile'),
+      'C#': files.some(f => f.ext === '.cs'),
+      'Swift': files.some(f => f.ext === '.swift'),
+      'Kotlin': files.some(f => f.ext === '.kt'),
+      'HTML/CSS': files.some(f => f.ext === '.html' || f.ext === '.css'),
+      'Docker': files.some(f => f.name === 'Dockerfile' || f.name === 'docker-compose.yml')
+    };
+
+    Object.entries(indicators).forEach(([tech, detected]) => {
+      if (detected) stack.add(tech);
+    });
+
+    return stack.size > 0 ? Array.from(stack) : ['Unknown'];
+  }
+
+  static getKeyDirectories(files) {
+    const dirs = new Set();
+    files.forEach(file => {
+      const parts = file.path.split('/');
+      if (parts.length > 1) {
+        dirs.add(parts[0]);
+      }
+    });
+    
+    const dirList = Array.from(dirs).slice(0, 8);
+    return dirList.length > 0 ? dirList.map(dir => `  - ${dir}/`).join('\n') : '  - (root level files only)';
+  }
+
+  static getMainFiles(codeFiles) {
+    const importantFiles = codeFiles.filter(file => {
+      const important = [
+        'index.js', 'index.ts', 'main.js', 'main.ts', 'app.js', 'app.ts',
+        'server.js', 'server.ts', 'index.html', 'main.py', '__init__.py',
+        'main.go', 'main.rs', 'App.jsx', 'App.tsx'
+      ];
+      return important.includes(file.name) || file.path.includes('src/');
+    });
+
+    const filesToShow = importantFiles.length > 0 ? importantFiles.slice(0, 8) : codeFiles.slice(0, 5);
+    return filesToShow.length > 0 ? filesToShow.map(file => `  - ${file.path}`).join('\n') : '  - (no main files detected)';
   }
 
   static async loadProjectContext() {
@@ -309,7 +408,7 @@ You are an expert AI coding agent. Respond concisely and practically.
       }
     }
     
-    return context || '# Project without specific defined context';
+    return context || '# Project without specific context files';
   }
 
   static async getRelevantFileContext(userInput) {
@@ -324,6 +423,368 @@ You are an expert AI coding agent. Respond concisely and practically.
     }
     
     return context;
+  }
+}
+
+// === AI Tools ===
+class AITools {
+  static async executeCommand(command, args = []) {
+    try {
+      const result = execSync(`${command} ${args.join(' ')}`, {
+        encoding: 'utf-8',
+        timeout: 10000,
+        cwd: process.cwd()
+      });
+      return { success: true, output: result.trim() };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+
+  static async runTests() {
+    const testCommands = ['npm test', 'yarn test', 'pytest', 'go test', 'cargo test'];
+    
+    for (const cmd of testCommands) {
+      const [command, ...args] = cmd.split(' ');
+      try {
+        execSync(`which ${command}`, { stdio: 'ignore' });
+        const result = await this.executeCommand(command, args);
+        if (result.success || result.error.includes('test')) {
+          return { command: cmd, ...result };
+        }
+      } catch {
+        continue;
+      }
+    }
+    
+    return { success: false, error: 'No test runner found' };
+  }
+
+  static async lintCode(filePath = '.') {
+    const linters = [
+      { cmd: 'eslint', args: [filePath, '--format', 'compact'] },
+      { cmd: 'pylint', args: [filePath] },
+      { cmd: 'golint', args: [filePath] },
+      { cmd: 'rustfmt', args: ['--check', filePath] }
+    ];
+
+    for (const { cmd, args } of linters) {
+      try {
+        execSync(`which ${cmd}`, { stdio: 'ignore' });
+        return await this.executeCommand(cmd, args);
+      } catch {
+        continue;
+      }
+    }
+
+    return { success: false, error: 'No linter found' };
+  }
+
+  static async formatCode(filePath) {
+    const formatters = [
+      { cmd: 'prettier', args: ['--write', filePath] },
+      { cmd: 'black', args: [filePath] },
+      { cmd: 'gofmt', args: ['-w', filePath] },
+      { cmd: 'rustfmt', args: [filePath] }
+    ];
+
+    for (const { cmd, args } of formatters) {
+      try {
+        execSync(`which ${cmd}`, { stdio: 'ignore' });
+        return await this.executeCommand(cmd, args);
+      } catch {
+        continue;
+      }
+    }
+
+    return { success: false, error: 'No formatter found' };
+  }
+
+  static async getGitStatus() {
+    try {
+      const status = await this.executeCommand('git', ['status', '--porcelain']);
+      const branch = await this.executeCommand('git', ['branch', '--show-current']);
+      const lastCommit = await this.executeCommand('git', ['log', '-1', '--oneline']);
+      
+      return {
+        success: true,
+        status: status.output,
+        branch: branch.output,
+        lastCommit: lastCommit.output
+      };
+    } catch {
+      return { success: false, error: 'Not a git repository' };
+    }
+  }
+
+  static async getDependencies() {
+    const packageFiles = ['package.json', 'requirements.txt', 'go.mod', 'Cargo.toml', 'pom.xml'];
+    const dependencies = {};
+
+    for (const file of packageFiles) {
+      if (await FileManager.exists(file)) {
+        try {
+          const content = await FileManager.readFile(file);
+          
+          if (file === 'package.json') {
+            const pkg = JSON.parse(content);
+            dependencies.npm = {
+              dependencies: pkg.dependencies || {},
+              devDependencies: pkg.devDependencies || {}
+            };
+          } else {
+            dependencies[file] = content;
+          }
+        } catch (error) {
+          dependencies[file] = `Error reading: ${error.message}`;
+        }
+      }
+    }
+
+    return dependencies;
+  }
+
+  static async searchInProject(query, filePattern = '*') {
+    try {
+      const result = await this.executeCommand('grep', ['-r', '--include=' + filePattern, query, '.']);
+      return {
+        success: true,
+        matches: result.output.split('\n').filter(line => line.trim())
+      };
+    } catch {
+      try {
+        const result = await this.executeCommand('findstr', ['/S', '/I', query, filePattern]);
+        return {
+          success: true,
+          matches: result.output.split('\n').filter(line => line.trim())
+        };
+      } catch {
+        return { success: false, error: 'Search command not available' };
+      }
+    }
+  }
+
+  static async getProjectStructure() {
+    try {
+      const result = await this.executeCommand('tree', ['-I', 'node_modules|.git|dist|build']);
+      return { success: true, structure: result.output };
+    } catch {
+      // Fallback to manual tree
+      const files = await FileManager.scanProject();
+      const structure = this.buildTreeStructure(files);
+      return { success: true, structure };
+    }
+  }
+
+  static buildTreeStructure(files) {
+    const tree = {};
+    
+    files.forEach(file => {
+      const parts = file.path.split('/');
+      let current = tree;
+      
+      parts.forEach((part, index) => {
+        if (index === parts.length - 1) {
+          current[part] = 'file';
+        } else {
+          if (!current[part]) current[part] = {};
+          current = current[part];
+        }
+      });
+    });
+
+    return this.formatTree(tree);
+  }
+
+  static formatTree(obj, prefix = '', isLast = true) {
+    let result = '';
+    const entries = Object.entries(obj);
+    
+    entries.forEach(([key, value], index) => {
+      const isLastEntry = index === entries.length - 1;
+      const connector = isLastEntry ? '└── ' : '├── ';
+      result += prefix + connector + key + '\n';
+      
+      if (typeof value === 'object') {
+        const newPrefix = prefix + (isLastEntry ? '    ' : '│   ');
+        result += this.formatTree(value, newPrefix, isLastEntry);
+      }
+    });
+    
+    return result;
+  }
+
+  static async installDependency(packageName, isDev = false) {
+    const managers = [
+      { cmd: 'npm', installArgs: ['install', isDev ? '--save-dev' : '--save'] },
+      { cmd: 'yarn', installArgs: ['add', isDev ? '--dev' : ''] },
+      { cmd: 'pnpm', installArgs: ['add', isDev ? '--save-dev' : ''] }
+    ];
+
+    for (const { cmd, installArgs } of managers) {
+      try {
+        execSync(`which ${cmd}`, { stdio: 'ignore' });
+        const args = [...installArgs.filter(arg => arg), packageName];
+        return await this.executeCommand(cmd, args);
+      } catch {
+        continue;
+      }
+    }
+
+    return { success: false, error: 'No package manager found' };
+  }
+}
+
+// === Enhanced AI Engine ===
+class EnhancedAIEngine extends AIEngine {
+  static async buildEnhancedPrompt(userInput) {
+    const basePrompt = await super.buildContextualPrompt(userInput);
+    const tools = await this.gatherToolContext(userInput);
+    
+    return `${basePrompt}
+
+# AVAILABLE TOOLS
+${tools}
+
+# TOOL USAGE INSTRUCTIONS
+You can use tools by responding with JSON in this format:
+{
+  "action": "tool_name",
+  "parameters": {...},
+  "explanation": "Why you're using this tool"
+}
+
+Available tools:
+- execute_command: Run shell commands
+- run_tests: Execute project tests
+- lint_code: Check code quality
+- format_code: Format code files
+- git_status: Get git repository status
+- search_project: Search for text in project
+- get_dependencies: List project dependencies
+- install_dependency: Install new packages
+- get_structure: Show project structure
+
+If you don't need tools, respond normally with text.`;
+  }
+
+  static async callOllama(prompt, options = {}) {
+    const { temperature = 0.7, stream = false } = options;
+    
+    try {
+      await this.verifyOllamaConnection();
+      const fullPrompt = await this.buildEnhancedPrompt(prompt);
+      
+      const response = execSync(`ollama run ${CONFIG.model}`, {
+        input: fullPrompt,
+        encoding: 'utf-8',
+        env: { 
+          ...process.env, 
+          OLLAMA_HOST: CONFIG.ollamaHost 
+        },
+        stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: 30000
+      });
+
+      agentState.addToHistory('user', prompt);
+      agentState.addToHistory('assistant', response);
+
+      return response.trim();
+    } catch (error) {
+      if (error.message.includes('ECONNREFUSED')) {
+        throw new Error('Ollama service is not running. Start it with: ollama serve');
+      } else if (error.message.includes('model') && error.message.includes('not found')) {
+        throw new Error(`Model "${CONFIG.model}" not found. Download it with: ollama pull ${CONFIG.model}`);
+      } else if (error.message.includes('timeout')) {
+        throw new Error('Ollama request timed out. The model might be loading or the query is too complex.');
+      } else {
+        throw new Error(`Error communicating with Ollama: ${error.message}\n\nTroubleshooting:\n1. Check if Ollama is running: ollama list\n2. Verify model exists: ollama pull ${CONFIG.model}\n3. Test manually: ollama run ${CONFIG.model} "test"`);
+      }
+    }
+  }
+
+  static async gatherToolContext(userInput) {
+    let context = '';
+    
+    // Add git context if available
+    const gitStatus = await AITools.getGitStatus();
+    if (gitStatus.success) {
+      context += `\n## Git Status\nBranch: ${gitStatus.branch}\nLast commit: ${gitStatus.lastCommit}\n`;
+    }
+
+    // Add dependency context
+    const deps = await AITools.getDependencies();
+    if (Object.keys(deps).length > 0) {
+      context += `\n## Dependencies\n${JSON.stringify(deps, null, 2)}\n`;
+    }
+
+    return context;
+  }
+
+  static async processToolResponse(response) {
+    try {
+      const parsed = JSON.parse(response);
+      if (parsed.action) {
+        return await this.executeTool(parsed);
+      }
+    } catch {
+      // Not a tool response, return as normal text
+      return { type: 'text', content: response };
+    }
+    
+    return { type: 'text', content: response };
+  }
+
+  static async executeTool(toolCall) {
+    const { action, parameters, explanation } = toolCall;
+    
+    console.log(`🔧 Using tool: ${action}`);
+    if (explanation) console.log(`💭 ${explanation}`);
+    
+    let result;
+    
+    switch (action) {
+      case 'execute_command':
+        result = await AITools.executeCommand(parameters.command, parameters.args || []);
+        break;
+      
+      case 'run_tests':
+        result = await AITools.runTests();
+        break;
+      
+      case 'lint_code':
+        result = await AITools.lintCode(parameters.path);
+        break;
+      
+      case 'format_code':
+        result = await AITools.formatCode(parameters.path);
+        break;
+      
+      case 'git_status':
+        result = await AITools.getGitStatus();
+        break;
+      
+      case 'search_project':
+        result = await AITools.searchInProject(parameters.query, parameters.pattern);
+        break;
+      
+      case 'get_dependencies':
+        result = await AITools.getDependencies();
+        break;
+      
+      case 'install_dependency':
+        result = await AITools.installDependency(parameters.package, parameters.isDev);
+        break;
+      
+      case 'get_structure':
+        result = await AITools.getProjectStructure();
+        break;
+      
+      default:
+        result = { success: false, error: `Unknown tool: ${action}` };
+    }
+    
+    return { type: 'tool', action, result };
   }
 }
 
@@ -356,14 +817,56 @@ class SmartAgent {
       
       case 'ollama':
         if (args[0] === 'config') {
-          return this.showOllamaConfig();
+          return SmartAgent.showOllamaConfig();
         } else if (args[0] === 'test') {
-          return this.testOllama();
+          return await SmartAgent.testOllama();
         }
         return 'Available ollama commands: /ollama config, /ollama test';
       
+      case 'model':
+        if (!args[0]) {
+          return SmartAgent.showAvailableModels();
+        } else if (args[0] === 'list') {
+          return await SmartAgent.listOllamaModels();
+        } else {
+          return await SmartAgent.changeModel(args[0]);
+        }
+        break;
+      
       case 'scan':
         return await this.scanProject();
+      
+      case 'test':
+        return await this.runTests();
+      
+      case 'lint':
+        const lintPath = args[0] || '.';
+        return await this.lintCode(lintPath);
+      
+      case 'format':
+        if (!args[0]) {
+          return 'Usage: /format <file>';
+        }
+        return await this.formatCode(args[0]);
+      
+      case 'git':
+        return await this.showGitStatus();
+      
+      case 'deps':
+        return await this.showDependencies();
+      
+      case 'install':
+        if (!args[0]) {
+          return 'Usage: /install <package> [--dev]';
+        }
+        const isDev = args.includes('--dev');
+        return await this.installPackage(args[0], isDev);
+      
+      case 'search':
+        if (!args[0]) {
+          return 'Usage: /search <query> [pattern]';
+        }
+        return await this.searchProject(args[0], args[1]);
       
       case 'clear':
         console.clear();
@@ -414,10 +917,20 @@ class SmartAgent {
   static async askQuestion(question) {
     try {
       console.log('🤔 Processing your question...\n');
-      const response = await AIEngine.callOllama(question);
       
-      console.log('🤖 DeepCoder AI:\n');
-      console.log(response);
+      // Use enhanced AI engine with tools
+      const response = await EnhancedAIEngine.callOllama(question);
+      const processedResponse = await EnhancedAIEngine.processToolResponse(response);
+      
+      if (processedResponse.type === 'tool') {
+        console.log(`✅ Tool execution completed: ${processedResponse.action}`);
+        console.log('📋 Result:');
+        console.log(JSON.stringify(processedResponse.result, null, 2));
+      } else {
+        console.log('🤖 DeepCoder AI:\n');
+        console.log(processedResponse.content);
+      }
+      
       console.log('\n' + '─'.repeat(50) + '\n');
       return 'Response provided above';
     } catch (error) {
@@ -438,15 +951,24 @@ class SmartAgent {
 3. Security or performance issues
 4. Refactoring suggestions
 
+You can also use tools to get additional context like running tests, checking git status, or linting.
+
 \`\`\`
 ${code}
 \`\`\``;
 
       console.log(`🔍 Analyzing ${filePath}...\n`);
-      const analysis = await AIEngine.callOllama(prompt);
+      const analysis = await EnhancedAIEngine.callOllama(prompt);
+      const processedResponse = await EnhancedAIEngine.processToolResponse(analysis);
       
-      console.log('📊 Code analysis:\n');
-      console.log(analysis);
+      if (processedResponse.type === 'tool') {
+        console.log(`✅ Tool execution completed: ${processedResponse.action}`);
+        console.log('📋 Tool Result:');
+        console.log(JSON.stringify(processedResponse.result, null, 2));
+      } else {
+        console.log('📊 Code analysis:\n');
+        console.log(processedResponse.content);
+      }
       console.log('\n' + '─'.repeat(50) + '\n');
       return 'Analysis completed';
     } catch (error) {
@@ -465,6 +987,8 @@ ${code}
       
       const prompt = `Modify the following code according to this instruction: "${instruction}"
 
+You can use tools like running tests, linting, or formatting after making changes.
+
 Respond ONLY with the modified code, without additional explanations.
 
 \`\`\`
@@ -472,15 +996,24 @@ ${originalCode}
 \`\`\``;
 
       console.log(`✏️ Editing ${filePath}...\n`);
-      const modifiedCode = await AIEngine.callOllama(prompt);
+      const modifiedCode = await EnhancedAIEngine.callOllama(prompt);
+      const processedResponse = await EnhancedAIEngine.processToolResponse(modifiedCode);
       
-      const cleanCode = this.extractCodeFromResponse(modifiedCode);
+      let finalCode = modifiedCode;
+      if (processedResponse.type === 'tool') {
+        console.log(`✅ Tool execution completed: ${processedResponse.action}`);
+        finalCode = originalCode; // Keep original if tool execution
+      } else {
+        finalCode = processedResponse.content;
+      }
+      
+      const cleanCode = this.extractCodeFromResponse(finalCode);
       await FileManager.writeFile(filePath, cleanCode);
       
       console.log(`✅ File updated: ${filePath}`);
       console.log(`💾 Backup created: ${backupPath}`);
       console.log('\n📝 Changes applied:\n');
-      console.log(modifiedCode);
+      console.log(finalCode);
       console.log('\n' + '─'.repeat(50) + '\n');
       return 'File edited successfully';
     } catch (error) {
@@ -496,17 +1029,29 @@ ${originalCode}
 
       const prompt = `Create a file ${filePath} that ${description}
 
+You can use tools to check dependencies, project structure, or similar files for reference.
+
 Respond ONLY with the file code, without additional explanations.`;
 
       console.log(`🆕 Creating ${filePath}...\n`);
-      const code = await AIEngine.callOllama(prompt);
+      const code = await EnhancedAIEngine.callOllama(prompt);
+      const processedResponse = await EnhancedAIEngine.processToolResponse(code);
       
-      const cleanCode = this.extractCodeFromResponse(code);
+      let finalCode = code;
+      if (processedResponse.type === 'tool') {
+        console.log(`✅ Tool execution completed: ${processedResponse.action}`);
+        // For creation, we might want to ask for the code after tool execution
+        finalCode = await EnhancedAIEngine.callOllama(`Now create the ${filePath} file with the context gathered.`);
+      } else {
+        finalCode = processedResponse.content;
+      }
+      
+      const cleanCode = this.extractCodeFromResponse(finalCode);
       await FileManager.writeFile(filePath, cleanCode);
       
       console.log(`✅ File created: ${filePath}`);
       console.log('\n📄 Generated content:\n');
-      console.log(code);
+      console.log(finalCode);
       console.log('\n' + '─'.repeat(50) + '\n');
       return 'File created successfully';
     } catch (error) {
@@ -545,6 +1090,157 @@ Respond ONLY with the file code, without additional explanations.`;
     }
   }
 
+  static async runTests() {
+    try {
+      console.log('🧪 Running tests...\n');
+      const result = await AITools.runTests();
+      
+      if (result.success) {
+        console.log(`✅ Tests executed with: ${result.command}`);
+        console.log('📋 Output:');
+        console.log(result.output);
+      } else {
+        console.log(`❌ ${result.error}`);
+      }
+      
+      console.log('\n' + '─'.repeat(50) + '\n');
+      return 'Test execution completed';
+    } catch (error) {
+      return `❌ Error running tests: ${error.message}`;
+    }
+  }
+
+  static async lintCode(path) {
+    try {
+      console.log(`🔍 Linting code at: ${path}...\n`);
+      const result = await AITools.lintCode(path);
+      
+      if (result.success) {
+        console.log('✅ Linting completed');
+        console.log('📋 Output:');
+        console.log(result.output);
+      } else {
+        console.log(`❌ ${result.error}`);
+      }
+      
+      console.log('\n' + '─'.repeat(50) + '\n');
+      return 'Linting completed';
+    } catch (error) {
+      return `❌ Error linting code: ${error.message}`;
+    }
+  }
+
+  static async formatCode(filePath) {
+    try {
+      console.log(`✨ Formatting code: ${filePath}...\n`);
+      const result = await AITools.formatCode(filePath);
+      
+      if (result.success) {
+        console.log('✅ Code formatted successfully');
+        if (result.output) {
+          console.log('📋 Output:');
+          console.log(result.output);
+        }
+      } else {
+        console.log(`❌ ${result.error}`);
+      }
+      
+      console.log('\n' + '─'.repeat(50) + '\n');
+      return 'Formatting completed';
+    } catch (error) {
+      return `❌ Error formatting code: ${error.message}`;
+    }
+  }
+
+  static async showGitStatus() {
+    try {
+      console.log('📊 Git status...\n');
+      const result = await AITools.getGitStatus();
+      
+      if (result.success) {
+        console.log(`📍 Branch: ${result.branch}`);
+        console.log(`📝 Last commit: ${result.lastCommit}`);
+        console.log('📋 Status:');
+        console.log(result.status || 'Working tree clean');
+      } else {
+        console.log(`❌ ${result.error}`);
+      }
+      
+      console.log('\n' + '─'.repeat(50) + '\n');
+      return 'Git status displayed';
+    } catch (error) {
+      return `❌ Error getting git status: ${error.message}`;
+    }
+  }
+
+  static async showDependencies() {
+    try {
+      console.log('📦 Project dependencies...\n');
+      const deps = await AITools.getDependencies();
+      
+      Object.entries(deps).forEach(([file, content]) => {
+        console.log(`📄 ${file}:`);
+        if (typeof content === 'object') {
+          console.log(JSON.stringify(content, null, 2));
+        } else {
+          console.log(content);
+        }
+        console.log('');
+      });
+      
+      console.log('─'.repeat(50) + '\n');
+      return 'Dependencies displayed';
+    } catch (error) {
+      return `❌ Error getting dependencies: ${error.message}`;
+    }
+  }
+
+  static async installPackage(packageName, isDev = false) {
+    try {
+      const devFlag = isDev ? ' (dev)' : '';
+      console.log(`📥 Installing ${packageName}${devFlag}...\n`);
+      const result = await AITools.installDependency(packageName, isDev);
+      
+      if (result.success) {
+        console.log('✅ Package installed successfully');
+        console.log('📋 Output:');
+        console.log(result.output);
+      } else {
+        console.log(`❌ ${result.error}`);
+      }
+      
+      console.log('\n' + '─'.repeat(50) + '\n');
+      return 'Package installation completed';
+    } catch (error) {
+      return `❌ Error installing package: ${error.message}`;
+    }
+  }
+
+  static async searchProject(query, pattern = '*') {
+    try {
+      console.log(`🔍 Searching for "${query}" in project...\n`);
+      const result = await AITools.searchInProject(query, pattern);
+      
+      if (result.success) {
+        console.log(`✅ Found ${result.matches.length} matches:`);
+        result.matches.slice(0, 20).forEach(match => {
+          console.log(`  ${match}`);
+        });
+        
+        if (result.matches.length > 20) {
+          console.log(`  ... and ${result.matches.length - 20} more matches`);
+        }
+      } else {
+        console.log(`❌ ${result.error}`);
+      }
+      
+      console.log('\n' + '─'.repeat(50) + '\n');
+      return 'Search completed';
+    } catch (error) {
+      return `❌ Error searching: ${error.message}`;
+    }
+  }
+
   static extractCodeFromResponse(response) {
     const codeBlockMatch = response.match(/```[\w]*\n([\s\S]*?)\n```/);
     if (codeBlockMatch) {
@@ -567,6 +1263,8 @@ Just type naturally! Examples:
 
 🔧 SPECIAL COMMANDS
   /help                    - Show this help
+  /model [name]           - Change AI model (e.g., codeqwen:14b)
+  /model list             - List available models
   /ollama config          - Show Ollama configuration
   /ollama test           - Test Ollama connection
   /scan                  - Scan project structure
@@ -588,16 +1286,18 @@ Just type naturally! Examples:
   }
 
   static showOllamaConfig() {
-    console.log(`
-🔧 Ollama Configuration:
-  Model: ${CONFIG.model}
-  Host: ${CONFIG.ollamaHost}
-  Context Files: ${CONFIG.contextFiles.join(', ')}
-  
-📝 Environment Variables:
-  DEEPCODE_MODEL=${process.env.DEEPCODE_MODEL || 'not set (using default)'}
-  OLLAMA_API_URL=${process.env.OLLAMA_API_URL || 'not set (using default)'}
-`);
+    const configText = [
+      '🔧 Ollama Configuration:',
+      `  Model: ${CONFIG.model}`,
+      `  Host: ${CONFIG.ollamaHost}`,
+      `  Context Files: ${CONFIG.contextFiles.join(', ')}`,
+      '',
+      '📝 Environment Variables:',
+      `  DEEPCODE_MODEL=${process.env.DEEPCODE_MODEL || 'not set (using default)'}`,
+      `  OLLAMA_API_URL=${process.env.OLLAMA_API_URL || 'not set (using default)'}`
+    ];
+
+    console.log('\n' + configText.join('\n') + '\n');
     return 'Configuration displayed';
   }
 
@@ -605,12 +1305,10 @@ Just type naturally! Examples:
     try {
       console.log('🧪 Testing Ollama connection...\n');
       
-      // Test connection
-      await AIEngine.verifyOllamaConnection();
+      await EnhancedAIEngine.verifyOllamaConnection();
       console.log('✅ Ollama service is running');
       
-      // Test model
-      const testResponse = await AIEngine.callOllama('Say "Hello from DeepCoder AI" and nothing else.');
+      const testResponse = await EnhancedAIEngine.callOllama('Say "Hello from DeepCoder AI" and nothing else.');
       console.log('✅ Model is responding');
       console.log('📝 Test response:', testResponse);
       
@@ -618,6 +1316,87 @@ Just type naturally! Examples:
     } catch (error) {
       console.log(`❌ Ollama test failed: ${error.message}`);
       return 'Ollama test failed';
+    }
+  }
+
+  static showAvailableModels() {
+    console.log('🤖 Available Model Commands:\n');
+    console.log('  /model                   - Show current model and available commands');
+    console.log('  /model list             - List all installed Ollama models');
+    console.log('  /model <name>           - Change to a specific model');
+    console.log('\n💡 Popular coding models:');
+    console.log('  • deepseek-coder        - Current default (good balance)');
+    console.log('  • codeqwen:14b          - Larger model for complex tasks');
+    console.log('  • codellama:7b          - Lightweight option');
+    console.log('  • codellama:13b         - Good performance');
+    console.log('  • phi3:mini             - Very lightweight');
+    console.log('\n🔧 Current model: ' + CONFIG.model);
+    console.log('📥 To install a new model: ollama pull <model-name>');
+    console.log('\n' + '─'.repeat(50) + '\n');
+    return 'Model commands displayed';
+  }
+
+  static async listOllamaModels() {
+    try {
+      console.log('🔍 Listing installed Ollama models...\n');
+      const result = await AITools.executeCommand('ollama', ['list']);
+      
+      if (result.success) {
+        console.log('📋 Installed models:');
+        console.log(result.output);
+        console.log(`\n🔧 Current model: ${CONFIG.model}`);
+        console.log('\n💡 Use "/model <name>" to switch models');
+      } else {
+        console.log(`❌ ${result.error}`);
+      }
+      
+      console.log('\n' + '─'.repeat(50) + '\n');
+      return 'Model list displayed';
+    } catch (error) {
+      return `❌ Error listing models: ${error.message}`;
+    }
+  }
+
+  static async changeModel(modelName) {
+    try {
+      console.log(`🔄 Changing model to: ${modelName}...\n`);
+      
+      // Check if model exists
+      const listResult = await AITools.executeCommand('ollama', ['list']);
+      if (listResult.success && !listResult.output.includes(modelName)) {
+        console.log(`⚠️ Model "${modelName}" not found locally.`);
+        console.log(`📥 Attempting to download model...`);
+        
+        const pullResult = await AITools.executeCommand('ollama', ['pull', modelName]);
+        if (!pullResult.success) {
+          console.log(`❌ Failed to download model: ${pullResult.error}`);
+          console.log(`💡 Try manually: ollama pull ${modelName}`);
+          return 'Model change failed';
+        }
+        console.log(`✅ Model ${modelName} downloaded successfully`);
+      }
+      
+      // Test the model
+      console.log(`🧪 Testing model ${modelName}...`);
+      const oldModel = CONFIG.model;
+      CONFIG.model = modelName;
+      
+      try {
+        const testResponse = await EnhancedAIEngine.callOllama('Say "Hello" and nothing else.');
+        console.log(`✅ Model ${modelName} is working correctly`);
+        console.log(`📝 Test response: ${testResponse}`);
+        console.log(`\n🔧 Model changed from "${oldModel}" to "${modelName}"`);
+        console.log(`💾 Note: This change is temporary for this session only`);
+        console.log(`🔧 To make it permanent, set: export DEEPCODE_MODEL="${modelName}"`);
+      } catch (error) {
+        CONFIG.model = oldModel;
+        throw new Error(`Model test failed: ${error.message}`);
+      }
+      
+      console.log('\n' + '─'.repeat(50) + '\n');
+      return 'Model changed successfully';
+    } catch (error) {
+      return `❌ Error changing model: ${error.message}`;
     }
   }
 }
@@ -668,16 +1447,118 @@ class InteractiveCLI {
   }
 
   showWelcome() {
-    console.log(`
-🚀 Welcome to DeepCoder AI
-   Intelligent coding agent with natural language interface
+    const welcomeText = [
+      '🧠 DeepCoder AI - Smart Interface with Tools',
+      '',
+      '💬 NATURAL INTERACTION',
+      'Just type naturally! Examples:',
+      '  "How can I optimize this React component?"',
+      '  "Analyze src/main.js"',
+      '  "Edit package.json to add a build script"',
+      '  "Create utils/helpers.js for validation"',
+      '  "Show me the project structure"',
+      '  "Run the tests"',
+      '  "What\'s the git status?"',
+      '',
+      '🔧 SPECIAL COMMANDS',
+      '  /help                    - Show this help',
+      '  /model [name]           - Change AI model (e.g., codeqwen:14b)',
+      '  /model list             - List available models',
+      '  /ollama config          - Show Ollama configuration',
+      '  /ollama test           - Test Ollama connection',
+      '  /scan                  - Scan project structure',
+      '  /test                  - Run project tests',
+      '  /lint [path]           - Lint code (default: .)',
+      '  /format <file>         - Format code file',
+      '  /git                   - Show git status',
+      '  /deps                  - Show dependencies',
+      '  /install <pkg> [--dev] - Install package',
+      '  /search <query> [pattern] - Search in project',
+      '  /clear                 - Clear screen',
+      '',
+      '🛠️ AI TOOLS',
+      'The AI can automatically use these tools:',
+      '  • Execute shell commands',
+      '  • Run tests (npm, yarn, pytest, etc.)',
+      '  • Lint code (eslint, pylint, etc.)',
+      '  • Format code (prettier, black, etc.)',
+      '  • Check git status and history',
+      '  • Search through project files',
+      '  • Analyze project dependencies',
+      '  • Install new packages',
+      '  • Get project structure',
+      '',
+      '💡 TOOL EXAMPLES',
+      '  "Run the tests and analyze the results"',
+      '  "Check if there are any linting errors in src/"',
+      '  "Install lodash as a dependency"',
+      '  "Search for all TODO comments"',
+      '  "Format all JavaScript files"',
+      '  "What\'s the current git branch and status?"',
+      '',
+      '📚 TIPS',
+      '  - Mention file names directly in your questions',
+      '  - Ask the AI to use tools when needed',
+      '  - Context is automatically loaded from project',
+      '  - Backups are created automatically when editing files',
+      '  - The AI can chain multiple tools for complex tasks',
+      '',
+      `🔧 Model: ${CONFIG.model} | Host: ${CONFIG.ollamaHost}`,
+      '',
+      '🔍 Analyzing your project...'
+    ];
 
-💡 Just type naturally - no commands needed!
-   Examples: "analyze main.js", "create a React component", "fix the bug in auth.py"
+    console.log('\n' + welcomeText.join('\n'));
+    this.showInitialProjectContext();
+  }
 
-🔧 Model: ${CONFIG.model} | Host: ${CONFIG.ollamaHost}
-📚 Type /help for special commands
-`);
+  async showInitialProjectContext() {
+    try {
+      const files = await FileManager.scanProject();
+      const codeFiles = files.filter(file => {
+        const codeExtensions = ['.js', '.ts', '.jsx', '.tsx', '.py', '.java', '.cpp', '.c', '.go', '.rs', '.php', '.rb', '.cs', '.swift', '.kt'];
+        return codeExtensions.includes(file.ext);
+      });
+
+      console.log(`📁 Project detected: ${files.length} files (${codeFiles.length} code files)`);
+      
+      // Show tech stack
+      const techStack = this.detectBasicTechStack(files);
+      if (techStack.length > 0) {
+        console.log(`💻 Tech stack: ${techStack.join(', ')}`);
+      }
+
+      // Show main directories
+      const dirs = new Set();
+      files.forEach(file => {
+        const parts = file.path.split('/');
+        if (parts.length > 1) dirs.add(parts[0]);
+      });
+      
+      if (dirs.size > 0) {
+        console.log(`📂 Main directories: ${Array.from(dirs).slice(0, 5).join(', ')}`);
+      }
+
+      console.log('✅ Project context loaded - ready for questions!\n');
+    } catch (error) {
+      console.log('⚠️ Could not analyze project structure\n');
+    }
+  }
+
+  detectBasicTechStack(files) {
+    const stack = [];
+    
+    if (files.some(f => f.name === 'package.json')) stack.push('Node.js');
+    if (files.some(f => f.ext === '.ts' || f.name === 'tsconfig.json')) stack.push('TypeScript');
+    if (files.some(f => f.ext === '.jsx' || f.ext === '.tsx')) stack.push('React');
+    if (files.some(f => f.ext === '.vue')) stack.push('Vue.js');
+    if (files.some(f => f.ext === '.py')) stack.push('Python');
+    if (files.some(f => f.ext === '.go')) stack.push('Go');
+    if (files.some(f => f.ext === '.rs')) stack.push('Rust');
+    if (files.some(f => f.ext === '.java')) stack.push('Java');
+    if (files.some(f => f.ext === '.php')) stack.push('PHP');
+    
+    return stack;
   }
 
   start() {
@@ -767,10 +1648,6 @@ async function main() {
     process.exit(1);
   }
 
-  if (!await FileManager.exists('CLAUDE.md') && !await FileManager.exists('README.md')) {
-    console.log('💡 Tip: Create a CLAUDE.md or README.md file to provide project context');
-  }
-
   console.log('🎉 All systems ready!\n');
 
   const cli = new InteractiveCLI();
@@ -784,4 +1661,4 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   });
 }
 
-export { SmartAgent, AIEngine, FileManager, AgentState };
+export { SmartAgent, EnhancedAIEngine, AITools, FileManager, AgentState };
