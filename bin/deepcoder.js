@@ -2,7 +2,7 @@
 
 /**
  * DeepCoder AI Agent - Intelligent coding assistant
- * Inspired by Claude Code with advanced capabilities
+ * Enhanced version with intelligent interface without explicit commands
  */
 
 import { promises as fs } from 'fs';
@@ -49,7 +49,6 @@ class AgentState {
   }
 
   trimHistory() {
-    // Keep only the last 20 interactions to avoid very long context
     if (this.sessionHistory.length > 40) {
       this.sessionHistory = this.sessionHistory.slice(-20);
     }
@@ -57,7 +56,7 @@ class AgentState {
 
   getContextualHistory() {
     return this.sessionHistory
-      .slice(-10) // Last 10 interactions
+      .slice(-10)
       .map(({ role, content }) => `### ${role.toUpperCase()}\n${content}`)
       .join('\n\n');
   }
@@ -86,6 +85,9 @@ class FileManager {
 
   static async writeFile(filePath, content) {
     try {
+      // Create directory if it doesn't exist
+      const dir = path.dirname(filePath);
+      await fs.mkdir(dir, { recursive: true });
       await fs.writeFile(filePath, content, 'utf-8');
     } catch (error) {
       throw new Error(`Could not write file ${filePath}: ${error.message}`);
@@ -115,7 +117,6 @@ class FileManager {
           const fullPath = path.join(dirPath, entry.name);
           const relativePath = path.relative(rootPath, fullPath);
           
-          // Filter excluded files
           if (CONFIG.excludePatterns.some(pattern => 
             relativePath.includes(pattern) || entry.name.match(pattern))) {
             continue;
@@ -140,6 +141,71 @@ class FileManager {
     await scanDir(rootPath);
     return files;
   }
+
+  static async getProjectFiles() {
+    const files = await this.scanProject();
+    return files.filter(file => {
+      const codeExtensions = ['.js', '.ts', '.jsx', '.tsx', '.py', '.java', '.cpp', '.c', '.go', '.rs', '.php', '.rb', '.cs', '.swift', '.kt'];
+      return codeExtensions.includes(file.ext);
+    });
+  }
+}
+
+// === Intelligence Engine ===
+class IntelligenceEngine {
+  static async analyzeInput(input) {
+    // Detect special commands
+    if (input.startsWith('/')) {
+      return { type: 'command', command: input.slice(1) };
+    }
+
+    // Detect mentioned files
+    const mentionedFiles = await this.extractFileReferences(input);
+    
+    // Detect intent patterns
+    const patterns = {
+      edit: /(?:edit|modify|change|update|fix)\s+(.+)/i,
+      create: /(?:create|generate|make|build)\s+(.+)/i,
+      analyze: /(?:analyze|review|check|examine|look at)\s+(.+)/i,
+      scan: /(?:scan|list|show)\s+(?:project|files|structure)/i,
+      explain: /(?:explain|what|how|why|tell me about)/i
+    };
+
+    for (const [intent, pattern] of Object.entries(patterns)) {
+      const match = input.match(pattern);
+      if (match) {
+        return {
+          type: 'intent',
+          intent,
+          target: match[1]?.trim(),
+          mentionedFiles,
+          originalInput: input
+        };
+      }
+    }
+
+    // Default to question/conversation
+    return {
+      type: 'conversation',
+      mentionedFiles,
+      originalInput: input
+    };
+  }
+
+  static async extractFileReferences(text) {
+    const filePattern = /(?:^|\s)([.\w/-]+\.[a-z]{1,4})(?:\s|$)/gi;
+    const matches = text.match(filePattern) || [];
+    const foundFiles = [];
+    
+    for (const match of matches) {
+      const filePath = match.trim();
+      if (await FileManager.exists(filePath)) {
+        foundFiles.push(filePath);
+      }
+    }
+    
+    return foundFiles;
+  }
 }
 
 // === AI Engine ===
@@ -148,12 +214,9 @@ class AIEngine {
     const { temperature = 0.7, stream = false } = options;
     
     try {
-      // First, verify Ollama is accessible
       await this.verifyOllamaConnection();
-      
       const fullPrompt = await this.buildContextualPrompt(prompt);
       
-      // Use a simpler command format that works reliably
       const response = execSync(`ollama run ${CONFIG.model}`, {
         input: fullPrompt,
         encoding: 'utf-8',
@@ -162,7 +225,7 @@ class AIEngine {
           OLLAMA_HOST: CONFIG.ollamaHost 
         },
         stdio: ['pipe', 'pipe', 'pipe'],
-        timeout: 30000 // 30 second timeout
+        timeout: 30000
       });
 
       agentState.addToHistory('user', prompt);
@@ -170,7 +233,6 @@ class AIEngine {
 
       return response.trim();
     } catch (error) {
-      // Enhanced error handling with specific suggestions
       if (error.message.includes('ECONNREFUSED')) {
         throw new Error('Ollama service is not running. Start it with: ollama serve');
       } else if (error.message.includes('model') && error.message.includes('not found')) {
@@ -185,7 +247,6 @@ class AIEngine {
 
   static async verifyOllamaConnection() {
     try {
-      // Test if Ollama service is running
       execSync('curl -s http://localhost:11434/api/version', { 
         stdio: 'ignore',
         timeout: 5000 
@@ -195,7 +256,6 @@ class AIEngine {
     }
 
     try {
-      // Test if model exists
       const modelList = execSync('ollama list', { 
         encoding: 'utf-8',
         timeout: 5000 
@@ -206,7 +266,7 @@ class AIEngine {
       }
     } catch (error) {
       if (error.message.includes('Model')) {
-        throw error; // Re-throw model not found errors
+        throw error;
       }
       throw new Error('Cannot verify Ollama models. Make sure Ollama is properly installed.');
     }
@@ -253,8 +313,7 @@ You are an expert AI coding agent. Respond concisely and practically.
   }
 
   static async getRelevantFileContext(userInput) {
-    // Identify files mentioned in user input
-    const mentionedFiles = await this.extractFileReferences(userInput);
+    const mentionedFiles = await IntelligenceEngine.extractFileReferences(userInput);
     let context = '';
     
     for (const filePath of mentionedFiles) {
@@ -266,17 +325,93 @@ You are an expert AI coding agent. Respond concisely and practically.
     
     return context;
   }
-
-  static async extractFileReferences(text) {
-    const filePattern = /(?:^|\s)([.\w/-]+\.[a-z]{1,4})(?:\s|$)/gi;
-    const matches = text.match(filePattern) || [];
-    return matches.map(match => match.trim());
-  }
 }
 
-// === Agent Commands ===
-class AgentCommands {
-  static async ask(question) {
+// === Smart Agent Commands ===
+class SmartAgent {
+  static async processInput(input) {
+    const analysis = await IntelligenceEngine.analyzeInput(input);
+    
+    switch (analysis.type) {
+      case 'command':
+        return await this.handleCommand(analysis.command);
+      
+      case 'intent':
+        return await this.handleIntent(analysis);
+      
+      case 'conversation':
+        return await this.handleConversation(analysis);
+      
+      default:
+        return await this.handleConversation(analysis);
+    }
+  }
+
+  static async handleCommand(command) {
+    const [cmd, ...args] = command.split(' ');
+    
+    switch (cmd.toLowerCase()) {
+      case 'help':
+        return this.showHelp();
+      
+      case 'ollama':
+        if (args[0] === 'config') {
+          return this.showOllamaConfig();
+        } else if (args[0] === 'test') {
+          return this.testOllama();
+        }
+        return 'Available ollama commands: /ollama config, /ollama test';
+      
+      case 'scan':
+        return await this.scanProject();
+      
+      case 'clear':
+        console.clear();
+        return 'Screen cleared';
+      
+      default:
+        return `Unknown command: /${cmd}. Type /help for available commands.`;
+    }
+  }
+
+  static async handleIntent(analysis) {
+    const { intent, target, mentionedFiles, originalInput } = analysis;
+    
+    switch (intent) {
+      case 'edit':
+        if (mentionedFiles.length > 0) {
+          return await this.editFile(mentionedFiles[0], originalInput);
+        }
+        return 'Please specify a file to edit.';
+      
+      case 'create':
+        const createMatch = originalInput.match(/create\s+(\S+)(?:\s+(.+))?/i);
+        if (createMatch) {
+          const fileName = createMatch[1];
+          const description = createMatch[2] || 'new file';
+          return await this.createFile(fileName, description);
+        }
+        return 'Please specify a file name and description.';
+      
+      case 'analyze':
+        if (mentionedFiles.length > 0) {
+          return await this.analyzeFile(mentionedFiles[0]);
+        }
+        return 'Please specify a file to analyze.';
+      
+      case 'scan':
+        return await this.scanProject();
+      
+      default:
+        return await this.askQuestion(originalInput);
+    }
+  }
+
+  static async handleConversation(analysis) {
+    return await this.askQuestion(analysis.originalInput);
+  }
+
+  static async askQuestion(question) {
     try {
       console.log('🤔 Processing your question...\n');
       const response = await AIEngine.callOllama(question);
@@ -284,16 +419,16 @@ class AgentCommands {
       console.log('🤖 DeepCoder AI:\n');
       console.log(response);
       console.log('\n' + '─'.repeat(50) + '\n');
+      return 'Response provided above';
     } catch (error) {
-      console.error('❌ Error:', error.message);
+      return `❌ Error: ${error.message}`;
     }
   }
 
-  static async analyze(filePath) {
+  static async analyzeFile(filePath) {
     try {
       if (!await FileManager.exists(filePath)) {
-        console.error(`❌ File not found: ${filePath}`);
-        return;
+        return `❌ File not found: ${filePath}`;
       }
 
       const code = await FileManager.readFile(filePath);
@@ -313,16 +448,16 @@ ${code}
       console.log('📊 Code analysis:\n');
       console.log(analysis);
       console.log('\n' + '─'.repeat(50) + '\n');
+      return 'Analysis completed';
     } catch (error) {
-      console.error('❌ Error during analysis:', error.message);
+      return `❌ Error during analysis: ${error.message}`;
     }
   }
 
-  static async edit(filePath, instruction) {
+  static async editFile(filePath, instruction) {
     try {
       if (!await FileManager.exists(filePath)) {
-        console.error(`❌ File not found: ${filePath}`);
-        return;
+        return `❌ File not found: ${filePath}`;
       }
 
       const originalCode = await FileManager.readFile(filePath);
@@ -339,9 +474,7 @@ ${originalCode}
       console.log(`✏️ Editing ${filePath}...\n`);
       const modifiedCode = await AIEngine.callOllama(prompt);
       
-      // Clean response to get only the code
       const cleanCode = this.extractCodeFromResponse(modifiedCode);
-      
       await FileManager.writeFile(filePath, cleanCode);
       
       console.log(`✅ File updated: ${filePath}`);
@@ -349,16 +482,16 @@ ${originalCode}
       console.log('\n📝 Changes applied:\n');
       console.log(modifiedCode);
       console.log('\n' + '─'.repeat(50) + '\n');
+      return 'File edited successfully';
     } catch (error) {
-      console.error('❌ Error during editing:', error.message);
+      return `❌ Error during editing: ${error.message}`;
     }
   }
 
-  static async create(filePath, description) {
+  static async createFile(filePath, description) {
     try {
       if (await FileManager.exists(filePath)) {
-        console.log(`⚠️ File ${filePath} already exists. Overwrite? (y/N)`);
-        // In a real implementation, you would wait for user confirmation here
+        console.log(`⚠️ File ${filePath} already exists. Overwriting...`);
       }
 
       const prompt = `Create a file ${filePath} that ${description}
@@ -375,12 +508,13 @@ Respond ONLY with the file code, without additional explanations.`;
       console.log('\n📄 Generated content:\n');
       console.log(code);
       console.log('\n' + '─'.repeat(50) + '\n');
+      return 'File created successfully';
     } catch (error) {
-      console.error('❌ Error during creation:', error.message);
+      return `❌ Error during creation: ${error.message}`;
     }
   }
 
-  static async scan() {
+  static async scanProject() {
     try {
       console.log('🔎 Scanning project...\n');
       const files = await FileManager.scanProject();
@@ -405,50 +539,86 @@ Respond ONLY with the file code, without additional explanations.`;
       
       console.log(`\n📊 Total: ${files.length} files found`);
       console.log('\n' + '─'.repeat(50) + '\n');
+      return 'Project scan completed';
     } catch (error) {
-      console.error('❌ Error during scanning:', error.message);
+      return `❌ Error during scanning: ${error.message}`;
     }
   }
 
   static extractCodeFromResponse(response) {
-    // Extract code from markdown code blocks
     const codeBlockMatch = response.match(/```[\w]*\n([\s\S]*?)\n```/);
     if (codeBlockMatch) {
       return codeBlockMatch[1];
     }
-    
-    // If no code blocks, return the complete response
     return response;
   }
 
   static showHelp() {
     console.log(`
-🧠 DeepCoder AI - Available Commands:
+🧠 DeepCoder AI - Smart Interface
 
-📝 BASIC
-  ask <question>              - Ask a question about code
-  help                        - Show this help
-  exit                        - Exit the program
+💬 NATURAL INTERACTION
+Just type naturally! Examples:
+  "How can I optimize this React component?"
+  "Analyze src/main.js"
+  "Edit package.json to add a build script"
+  "Create utils/helpers.js for validation"
+  "Show me the project structure"
 
-🔍 ANALYSIS
-  analyze <file>              - Analyze a code file
-  scan                        - Scan project structure
+🔧 SPECIAL COMMANDS
+  /help                    - Show this help
+  /ollama config          - Show Ollama configuration
+  /ollama test           - Test Ollama connection
+  /scan                  - Scan project structure
+  /clear                 - Clear screen
 
-✏️ EDITING
-  edit <file>                 - Edit file with instructions
-  create <file> <desc>        - Create new file
-
-🛠️ EXAMPLES
-  ask "How to optimize this algorithm?"
-  analyze src/main.js
-  edit package.json "add build script"
-  create utils/helpers.js "validation utilities"
-
-📚 TIPS
-  - Place CLAUDE.md or README.md files for project context
+💡 TIPS
+  - Mention file names directly in your questions
+  - Use natural language for any coding task
+  - Context is automatically loaded from CLAUDE.md, README.md
   - Backups are created automatically when editing files
-  - Use specific file names for better context
+
+🚀 EXAMPLES
+  "What's wrong with my authentication function?"
+  "Make the login form more secure"
+  "Generate a React component for user profiles"
+  "Review the database connection code"
 `);
+    return 'Help displayed';
+  }
+
+  static showOllamaConfig() {
+    console.log(`
+🔧 Ollama Configuration:
+  Model: ${CONFIG.model}
+  Host: ${CONFIG.ollamaHost}
+  Context Files: ${CONFIG.contextFiles.join(', ')}
+  
+📝 Environment Variables:
+  DEEPCODE_MODEL=${process.env.DEEPCODE_MODEL || 'not set (using default)'}
+  OLLAMA_API_URL=${process.env.OLLAMA_API_URL || 'not set (using default)'}
+`);
+    return 'Configuration displayed';
+  }
+
+  static async testOllama() {
+    try {
+      console.log('🧪 Testing Ollama connection...\n');
+      
+      // Test connection
+      await AIEngine.verifyOllamaConnection();
+      console.log('✅ Ollama service is running');
+      
+      // Test model
+      const testResponse = await AIEngine.callOllama('Say "Hello from DeepCoder AI" and nothing else.');
+      console.log('✅ Model is responding');
+      console.log('📝 Test response:', testResponse);
+      
+      return 'Ollama test completed successfully';
+    } catch (error) {
+      console.log(`❌ Ollama test failed: ${error.message}`);
+      return 'Ollama test failed';
+    }
   }
 }
 
@@ -472,7 +642,17 @@ class InteractiveCLI {
         return;
       }
 
-      await this.processCommand(input);
+      if (input.toLowerCase() === 'exit' || input.toLowerCase() === 'quit') {
+        this.rl.close();
+        return;
+      }
+
+      try {
+        await SmartAgent.processInput(input);
+      } catch (error) {
+        console.error('❌ Error:', error.message);
+      }
+      
       this.rl.prompt();
     });
 
@@ -481,107 +661,22 @@ class InteractiveCLI {
       process.exit(0);
     });
 
-    // Handle Ctrl+C gracefully
     process.on('SIGINT', () => {
       console.log('\n\n⚠️ Closing DeepCoder AI...');
       this.rl.close();
     });
   }
 
-  async processCommand(input) {
-    const [command, ...args] = input.split(' ');
-    const argsString = args.join(' ');
-
-    try {
-      switch (command.toLowerCase()) {
-        case 'ask':
-          if (!argsString) {
-            console.log('❓ Usage: ask <your question>');
-            break;
-          }
-          await AgentCommands.ask(argsString);
-          break;
-
-        case 'analyze':
-          if (!args[0]) {
-            console.log('❓ Usage: analyze <file>');
-            break;
-          }
-          await AgentCommands.analyze(args[0]);
-          break;
-
-        case 'edit':
-          if (!args[0]) {
-            console.log('❓ Usage: edit <file>');
-            console.log('You will be prompted for editing instructions');
-            break;
-          }
-          
-          const instruction = await this.promptUser('✏️ What changes do you want to make?\n> ');
-          await AgentCommands.edit(args[0], instruction);
-          break;
-
-        case 'create':
-          if (!args[0]) {
-            console.log('❓ Usage: create <file> <description>');
-            break;
-          }
-          
-          const fileName = args[0];
-          const description = args.slice(1).join(' ') || 
-            await this.promptUser(`📝 Describe what ${fileName} should do:\n> `);
-          
-          await AgentCommands.create(fileName, description);
-          break;
-
-        case 'scan':
-          await AgentCommands.scan();
-          break;
-
-        case 'help':
-          AgentCommands.showHelp();
-          break;
-
-        case 'exit':
-        case 'quit':
-          this.rl.close();
-          break;
-
-        case 'clear':
-          console.clear();
-          this.showWelcome();
-          break;
-
-        default:
-          console.log(`❓ Unknown command: ${command}`);
-          console.log('Type "help" to see available commands');
-      }
-    } catch (error) {
-      console.error('❌ Error executing command:', error.message);
-    }
-  }
-
-  async promptUser(question) {
-    return new Promise((resolve) => {
-      const tempRl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout
-      });
-      
-      tempRl.question(question, (answer) => {
-        tempRl.close();
-        resolve(answer);
-      });
-    });
-  }
-
   showWelcome() {
     console.log(`
 🚀 Welcome to DeepCoder AI
-   Intelligent coding agent with Ollama + ${CONFIG.model}
+   Intelligent coding agent with natural language interface
 
-💡 Type "help" to see available commands
+💡 Just type naturally - no commands needed!
+   Examples: "analyze main.js", "create a React component", "fix the bug in auth.py"
+
 🔧 Model: ${CONFIG.model} | Host: ${CONFIG.ollamaHost}
+📚 Type /help for special commands
 `);
   }
 
@@ -596,7 +691,6 @@ class InteractiveCLI {
 async function main() {
   console.log('🧠 Starting DeepCoder AI...\n');
 
-  // Enhanced Ollama verification
   try {
     console.log('🔍 Checking Ollama installation...');
     execSync('ollama --version', { stdio: 'ignore' });
@@ -608,7 +702,6 @@ async function main() {
     process.exit(1);
   }
 
-  // Check if Ollama service is running
   try {
     console.log('🔍 Checking Ollama service...');
     execSync('curl -s http://localhost:11434/api/version', { 
@@ -623,7 +716,6 @@ async function main() {
     process.exit(1);
   }
 
-  // Verify that the model is available
   try {
     console.log(`🔍 Checking model: ${CONFIG.model}...`);
     const modelList = execSync('ollama list', { encoding: 'utf-8', timeout: 10000 });
@@ -637,7 +729,7 @@ async function main() {
       try {
         execSync(`ollama pull ${CONFIG.model}`, { 
           stdio: 'inherit',
-          timeout: 300000 // 5 minutes timeout for download
+          timeout: 300000
         });
         console.log(`✅ Model ${CONFIG.model} downloaded successfully`);
       } catch (downloadError) {
@@ -655,7 +747,6 @@ async function main() {
     process.exit(1);
   }
 
-  // Test the model with a simple query
   try {
     console.log('🧪 Testing model response...');
     const testResponse = execSync(`ollama run ${CONFIG.model}`, {
@@ -676,19 +767,16 @@ async function main() {
     process.exit(1);
   }
 
-  // Initialize project if necessary
   if (!await FileManager.exists('CLAUDE.md') && !await FileManager.exists('README.md')) {
     console.log('💡 Tip: Create a CLAUDE.md or README.md file to provide project context');
   }
 
   console.log('🎉 All systems ready!\n');
 
-  // Start CLI
   const cli = new InteractiveCLI();
   cli.start();
 }
 
-// Execute only if this is the main file
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch(error => {
     console.error('❌ Fatal error:', error);
@@ -696,4 +784,4 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   });
 }
 
-export { AgentCommands, AIEngine, FileManager, AgentState };
+export { SmartAgent, AIEngine, FileManager, AgentState };
