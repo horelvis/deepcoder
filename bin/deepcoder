@@ -1,146 +1,599 @@
-#!/usr/bin/env node
+// === Initialization ===#!/usr/bin/env node
 
-// DeepCode: Local AI assistant using Ollama + DeepSeek with long-context support
-import fs from 'fs';
-import readline from 'readline';
-import { execSync } from 'child_process';
+/**
+ * DeepCode AI Agent - Intelligent coding assistant
+ * Inspired by Claude Code with advanced capabilities
+ */
+
+import fs from 'fs/promises';
 import path from 'path';
-import os from 'os';
+import readline from 'readline';
+import { execSync, spawn } from 'child_process';
+import { fileURLToPath } from 'url';
+import { promisify } from 'util';
 
 // === Configuration ===
-const ollamaModel = 'deepseek-coder';  // change to 'codellama' or others if needed
-const ollamaHost = process.env.OLLAMA_API_URL || 'http://localhost:11434';
-let sessionHistory = [];  // for long-context memory
+const CONFIG = {
+  model: process.env.DEEPCODE_MODEL || 'deepseek-coder',
+  ollamaHost: process.env.OLLAMA_API_URL || 'http://localhost:11434',
+  maxHistoryTokens: 8000,
+  contextFiles: ['CLAUDE.md', 'README.md', '.deepcode.md'],
+  excludePatterns: [
+    'node_modules',
+    '.git',
+    'dist',
+    'build',
+    '*.log',
+    '.env*',
+    '*.min.js'
+  ]
+};
 
-// === Helper: Load project context from CLAUDE.md ===
-function loadProjectContext() {
-  const contextPath = path.resolve('CLAUDE.md');
-  return fs.existsSync(contextPath) ? fs.readFileSync(contextPath, 'utf-8') : '';
+// === Global State ===
+class AgentState {
+  constructor() {
+    this.sessionHistory = [];
+    this.currentProject = null;
+    this.activeFiles = new Map();
+    this.lastCommand = null;
+  }
+
+  addToHistory(role, content, metadata = {}) {
+    this.sessionHistory.push({
+      role,
+      content,
+      timestamp: new Date().toISOString(),
+      ...metadata
+    });
+    this.trimHistory();
+  }
+
+  trimHistory() {
+    // Keep only the last 20 interactions to avoid very long context
+    if (this.sessionHistory.length > 40) {
+      this.sessionHistory = this.sessionHistory.slice(-20);
+    }
+  }
+
+  getContextualHistory() {
+    return this.sessionHistory
+      .slice(-10) // Last 10 interactions
+      .map(({ role, content }) => `### ${role.toUpperCase()}\n${content}`)
+      .join('\n\n');
+  }
 }
 
-// === Helper: Build prompt with context + history ===
-function buildPrompt(userInput) {
-  const context = loadProjectContext();
-  const historyText = sessionHistory
-    .map(({ role, content }) => `### ${role.toUpperCase()}\n${content}`)
-    .join('\n\n');
+const agentState = new AgentState();
 
-  return `
+// === System Utilities ===
+class FileManager {
+  static async exists(filePath) {
+    try {
+      await fs.access(filePath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  static async readFile(filePath) {
+    try {
+      return await fs.readFile(filePath, 'utf-8');
+    } catch (error) {
+      throw new Error(`Could not read file ${filePath}: ${error.message}`);
+    }
+  }
+
+  static async writeFile(filePath, content) {
+    try {
+      await fs.writeFile(filePath, content, 'utf-8');
+    } catch (error) {
+      throw new Error(`Could not write file ${filePath}: ${error.message}`);
+    }
+  }
+
+  static async createBackup(filePath) {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const backupPath = `${filePath}.backup-${timestamp}`;
+    
+    if (await this.exists(filePath)) {
+      const content = await this.readFile(filePath);
+      await this.writeFile(backupPath, content);
+      return backupPath;
+    }
+    return null;
+  }
+
+  static async scanProject(rootPath = '.') {
+    const files = [];
+    
+    async function scanDir(dirPath) {
+      try {
+        const entries = await fs.readdir(dirPath, { withFileTypes: true });
+        
+        for (const entry of entries) {
+          const fullPath = path.join(dirPath, entry.name);
+          const relativePath = path.relative(rootPath, fullPath);
+          
+          // Filtrar archivos excluidos
+          if (CONFIG.excludePatterns.some(pattern => 
+            relativePath.includes(pattern) || entry.name.match(pattern))) {
+            continue;
+          }
+          
+          if (entry.isDirectory()) {
+            await scanDir(fullPath);
+          } else if (entry.isFile()) {
+            files.push({
+              path: relativePath,
+              fullPath,
+              name: entry.name,
+              ext: path.extname(entry.name)
+            });
+          }
+        }
+      } catch (error) {
+        // Ignorar directorios sin permisos
+      }
+    }
+    
+    await scanDir(rootPath);
+    return files;
+  }
+}
+
+// === AI Engine ===
+class AIEngine {
+  static async callOllama(prompt, options = {}) {
+    const { temperature = 0.7, stream = false } = options;
+    
+    try {
+      const fullPrompt = await this.buildContextualPrompt(prompt);
+      
+      const command = [
+        'ollama', 'run', CONFIG.model,
+        '--temperature', temperature.toString()
+      ];
+
+      const response = execSync(command.join(' '), {
+        input: fullPrompt,
+        encoding: 'utf-8',
+        env: { ...process.env, OLLAMA_HOST: CONFIG.ollamaHost },
+        stdio: ['pipe', 'pipe', 'inherit']
+      });
+
+      agentState.addToHistory('user', prompt);
+      agentState.addToHistory('assistant', response);
+
+      return response.trim();
+    } catch (error) {
+      throw new Error(`Error communicating with Ollama: ${error.message}`);
+    }
+  }
+
+  static async buildContextualPrompt(userInput) {
+    const projectContext = await this.loadProjectContext();
+    const fileContext = await this.getRelevantFileContext(userInput);
+    const history = agentState.getContextualHistory();
+
+    return `
 # PROJECT CONTEXT
+${projectContext}
 
-${context}
+# RELEVANT FILES
+${fileContext}
 
 # CONVERSATION HISTORY
+${history}
 
-${historyText}
-
-# NEW USER INPUT
-
+# USER INSTRUCTION
 ${userInput}
+
+# INSTRUCTIONS FOR ASSISTANT
+You are an expert AI coding agent. Respond concisely and practically.
+- Provide functional and well-commented code
+- Explain your technical decisions
+- Suggest best practices when relevant
+- If modifying files, clearly explain the changes
 `.trim();
+  }
+
+  static async loadProjectContext() {
+    let context = '';
+    
+    for (const contextFile of CONFIG.contextFiles) {
+      if (await FileManager.exists(contextFile)) {
+        const content = await FileManager.readFile(contextFile);
+        context += `\n## ${contextFile}\n${content}\n`;
+      }
+    }
+    
+    return context || '# Project without specific defined context';
+  }
+
+  static async getRelevantFileContext(userInput) {
+    // Identificar archivos mencionados en la entrada del usuario
+    const mentionedFiles = await this.extractFileReferences(userInput);
+    let context = '';
+    
+    for (const filePath of mentionedFiles) {
+      if (await FileManager.exists(filePath)) {
+        const content = await FileManager.readFile(filePath);
+        context += `\n## ${filePath}\n\`\`\`\n${content}\n\`\`\`\n`;
+      }
+    }
+    
+    return context;
+  }
+
+  static async extractFileReferences(text) {
+    const filePattern = /(?:^|\s)([.\w/-]+\.[a-z]{1,4})(?:\s|$)/gi;
+    const matches = text.match(filePattern) || [];
+    return matches.map(match => match.trim());
+  }
 }
 
-// === Helper: Call Ollama model ===
-function callOllama(prompt) {
-  const fullPrompt = buildPrompt(prompt);
-  try {
-    const output = execSync(`OLLAMA_HOST=${ollamaHost} ollama run ${ollamaModel}`, {
-      input: fullPrompt,
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'inherit']
+// === Agent Commands ===
+class AgentCommands {
+  static async ask(question) {
+    try {
+      console.log('🤔 Processing your question...\n');
+      const response = await AIEngine.callOllama(question);
+      
+      console.log('🤖 DeepCode AI:\n');
+      console.log(response);
+      console.log('\n' + '─'.repeat(50) + '\n');
+    } catch (error) {
+      console.error('❌ Error:', error.message);
+    }
+  }
+
+  static async analyze(filePath) {
+    try {
+      if (!await FileManager.exists(filePath)) {
+        console.error(`❌ File not found: ${filePath}`);
+        return;
+      }
+
+      const code = await FileManager.readFile(filePath);
+      const prompt = `Analyze this code and provide:
+1. Functionality summary
+2. Possible improvements
+3. Security or performance issues
+4. Refactoring suggestions
+
+\`\`\`
+${code}
+\`\`\``;
+
+      console.log(`🔍 Analyzing ${filePath}...\n`);
+      const analysis = await AIEngine.callOllama(prompt);
+      
+      console.log('📊 Code analysis:\n');
+      console.log(analysis);
+      console.log('\n' + '─'.repeat(50) + '\n');
+    } catch (error) {
+      console.error('❌ Error during analysis:', error.message);
+    }
+  }
+
+  static async edit(filePath, instruction) {
+    try {
+      if (!await FileManager.exists(filePath)) {
+        console.error(`❌ File not found: ${filePath}`);
+        return;
+      }
+
+      const originalCode = await FileManager.readFile(filePath);
+      const backupPath = await FileManager.createBackup(filePath);
+      
+      const prompt = `Modify the following code according to this instruction: "${instruction}"
+
+Respond ONLY with the modified code, without additional explanations.
+
+\`\`\`
+${originalCode}
+\`\`\``;
+
+      console.log(`✏️ Editing ${filePath}...\n`);
+      const modifiedCode = await AIEngine.callOllama(prompt);
+      
+      // Clean response to get only the code
+      const cleanCode = this.extractCodeFromResponse(modifiedCode);
+      
+      await FileManager.writeFile(filePath, cleanCode);
+      
+      console.log(`✅ File updated: ${filePath}`);
+      console.log(`💾 Backup created: ${backupPath}`);
+      console.log('\n📝 Changes applied:\n');
+      console.log(modifiedCode);
+      console.log('\n' + '─'.repeat(50) + '\n');
+    } catch (error) {
+      console.error('❌ Error during editing:', error.message);
+    }
+  }
+
+  static async create(filePath, description) {
+    try {
+      if (await FileManager.exists(filePath)) {
+        console.log(`⚠️ File ${filePath} already exists. Overwrite? (y/N)`);
+        // In a real implementation, you would wait for user confirmation here
+      }
+
+      const prompt = `Create a file ${filePath} that ${description}
+
+Respond ONLY with the file code, without additional explanations.`;
+
+      console.log(`🆕 Creating ${filePath}...\n`);
+      const code = await AIEngine.callOllama(prompt);
+      
+      const cleanCode = this.extractCodeFromResponse(code);
+      await FileManager.writeFile(filePath, cleanCode);
+      
+      console.log(`✅ File created: ${filePath}`);
+      console.log('\n📄 Generated content:\n');
+      console.log(code);
+      console.log('\n' + '─'.repeat(50) + '\n');
+    } catch (error) {
+      console.error('❌ Error during creation:', error.message);
+    }
+  }
+
+  static async scan() {
+    try {
+      console.log('🔎 Scanning project...\n');
+      const files = await FileManager.scanProject();
+      
+      const filesByType = files.reduce((acc, file) => {
+        const ext = file.ext || 'no extension';
+        if (!acc[ext]) acc[ext] = [];
+        acc[ext].push(file.path);
+        return acc;
+      }, {});
+
+      console.log('📁 Project structure:\n');
+      Object.entries(filesByType).forEach(([ext, filePaths]) => {
+        console.log(`${ext}: ${filePaths.length} files`);
+        filePaths.slice(0, 5).forEach(filePath => {
+          console.log(`  - ${filePath}`);
+        });
+        if (filePaths.length > 5) {
+          console.log(`  ... and ${filePaths.length - 5} more`);
+        }
+      });
+      
+      console.log(`\n📊 Total: ${files.length} files found`);
+      console.log('\n' + '─'.repeat(50) + '\n');
+    } catch (error) {
+      console.error('❌ Error during scanning:', error.message);
+    }
+  }
+
+  static extractCodeFromResponse(response) {
+    // Extract code from markdown code blocks
+    const codeBlockMatch = response.match(/```[\w]*\n([\s\S]*?)\n```/);
+    if (codeBlockMatch) {
+      return codeBlockMatch[1];
+    }
+    
+    // If no code blocks, return the complete response
+    return response;
+  }
+
+  static showHelp() {
+    console.log(`
+🧠 DeepCode AI - Available Commands:
+
+📝 BASIC
+  ask <question>              - Ask a question about code
+  help                        - Show this help
+  exit                        - Exit the program
+
+🔍 ANALYSIS
+  analyze <file>              - Analyze a code file
+  scan                        - Scan project structure
+
+✏️ EDITING
+  edit <file>                 - Edit file with instructions
+  create <file> <desc>        - Create new file
+
+🛠️ EXAMPLES
+  ask "How to optimize this algorithm?"
+  analyze src/main.js
+  edit package.json "add build script"
+  create utils/helpers.js "validation utilities"
+
+📚 TIPS
+  - Place CLAUDE.md or README.md files for project context
+  - Backups are created automatically when editing files
+  - Use specific file names for better context
+`);
+  }
+}
+
+// === Interactive CLI ===
+class InteractiveCLI {
+  constructor() {
+    this.rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      prompt: '🧠 deepcode > '
+    });
+    
+    this.setupHandlers();
+  }
+
+  setupHandlers() {
+    this.rl.on('line', async (line) => {
+      const input = line.trim();
+      if (!input) {
+        this.rl.prompt();
+        return;
+      }
+
+      await this.processCommand(input);
+      this.rl.prompt();
     });
 
-    sessionHistory.push({ role: 'user', content: prompt });
-    sessionHistory.push({ role: 'assistant', content: output });
+    this.rl.on('close', () => {
+      console.log('\n👋 Goodbye! DeepCode AI signing off.');
+      process.exit(0);
+    });
 
-    return output;
-  } catch (err) {
-    console.error('❌ Failed to call Ollama:', err.message);
-    return '';
-  }
-}
-
-// === Command: Ask a coding question ===
-function handleAsk(question) {
-  const response = callOllama(question);
-  console.log('\n🤖 DeepCode:\n');
-  console.log(response);
-}
-
-// === Command: Summarize a code file ===
-function handleSummarize(filename) {
-  if (!fs.existsSync(filename)) {
-    console.error(`❌ File not found: ${filename}`);
-    return;
-  }
-  const code = fs.readFileSync(filename, 'utf-8');
-  const prompt = `Please summarize what this code does:\n\n\`\`\`\n${code}\n\`\`\``;
-  const response = callOllama(prompt);
-  console.log('\n📝 Summary:\n');
-  console.log(response);
-}
-
-// === Command: Edit a file using instructions ===
-function handleEdit(filename) {
-  if (!fs.existsSync(filename)) {
-    console.error(`❌ File not found: ${filename}`);
-    return;
+    // Handle Ctrl+C gracefully
+    process.on('SIGINT', () => {
+      console.log('\n\n⚠️ Closing DeepCode AI...');
+      this.rl.close();
+    });
   }
 
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  rl.question('🛠️ What do you want to change in the file?\n> ', (instruction) => {
-    const originalCode = fs.readFileSync(filename, 'utf-8');
-    const prompt = `Modify the following code according to this instruction: "${instruction}"\n\n\`\`\`js\n${originalCode}\n\`\`\``;
-    const newCode = callOllama(prompt);
-    const backup = `${filename}.bak`;
+  async processCommand(input) {
+    const [command, ...args] = input.split(' ');
+    const argsString = args.join(' ');
 
-    fs.writeFileSync(backup, originalCode);
-    fs.writeFileSync(filename, newCode);
+    try {
+      switch (command.toLowerCase()) {
+        case 'ask':
+          if (!argsString) {
+            console.log('❓ Usage: ask <your question>');
+            break;
+          }
+          await AgentCommands.ask(argsString);
+          break;
 
-    console.log(`✅ File updated. Original saved to ${backup}`);
-    rl.close();
-  });
-}
+        case 'analyze':
+          if (!args[0]) {
+            console.log('❓ Usage: analyze <file>');
+            break;
+          }
+          await AgentCommands.analyze(args[0]);
+          break;
 
-// === CLI Interactive Mode ===
-function startCLI() {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    prompt: '🧠 deepcode > '
-  });
+        case 'edit':
+          if (!args[0]) {
+            console.log('❓ Usage: edit <file>');
+            console.log('You will be prompted for editing instructions');
+            break;
+          }
+          
+          const instruction = await this.promptUser('✏️ What changes do you want to make?\n> ');
+          await AgentCommands.edit(args[0], instruction);
+          break;
 
-  console.log('🚀 Welcome to DeepCode (powered by Ollama + DeepSeek)');
-  rl.prompt();
+        case 'create':
+          if (!args[0]) {
+            console.log('❓ Usage: create <file> <description>');
+            break;
+          }
+          
+          const fileName = args[0];
+          const description = args.slice(1).join(' ') || 
+            await this.promptUser(`📝 Describe what ${fileName} should do:\n> `);
+          
+          await AgentCommands.create(fileName, description);
+          break;
 
-  rl.on('line', (line) => {
-    const [cmd, ...args] = line.trim().split(' ');
-    const argStr = args.join(' ');
+        case 'scan':
+          await AgentCommands.scan();
+          break;
 
-    switch (cmd) {
-      case 'ask':
-        handleAsk(argStr);
-        break;
-      case 'summarize':
-        handleSummarize(argStr);
-        break;
-      case 'edit':
-        handleEdit(argStr);
-        break;
-      case 'exit':
-        rl.close();
-        break;
-      default:
-        console.log(`❓ Unknown command: ${cmd}`);
-        console.log('Available commands: ask, summarize [file], edit [file], exit');
+        case 'help':
+          AgentCommands.showHelp();
+          break;
+
+        case 'exit':
+        case 'quit':
+          this.rl.close();
+          break;
+
+        case 'clear':
+          console.clear();
+          this.showWelcome();
+          break;
+
+        default:
+          console.log(`❓ Unknown command: ${command}`);
+          console.log('Type "help" to see available commands');
+      }
+    } catch (error) {
+      console.error('❌ Error executing command:', error.message);
     }
-    rl.prompt();
-  });
+  }
 
-  rl.on('close', () => {
-    console.log('\n👋 Goodbye from DeepCode!');
-    process.exit(0);
+  async promptUser(question) {
+    return new Promise((resolve) => {
+      const tempRl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout
+      });
+      
+      tempRl.question(question, (answer) => {
+        tempRl.close();
+        resolve(answer);
+      });
+    });
+  }
+
+  showWelcome() {
+    console.log(`
+🚀 Welcome to DeepCode AI
+   Intelligent coding agent with Ollama + ${CONFIG.model}
+
+💡 Type "help" to see available commands
+🔧 Model: ${CONFIG.model} | Host: ${CONFIG.ollamaHost}
+`);
+  }
+
+  start() {
+    console.clear();
+    this.showWelcome();
+    this.rl.prompt();
+  }
+}
+
+// === Initialization ===
+async function main() {
+  // Verify that Ollama is available
+  try {
+    execSync('ollama --version', { stdio: 'ignore' });
+  } catch {
+    console.error('❌ Ollama is not installed or not in PATH');
+    console.error('   Install Ollama from: https://ollama.ai');
+    process.exit(1);
+  }
+
+  // Verify that the model is available
+  try {
+    execSync(`ollama list | grep ${CONFIG.model}`, { stdio: 'ignore' });
+  } catch {
+    console.log(`⬇️ Downloading model ${CONFIG.model}...`);
+    try {
+      execSync(`ollama pull ${CONFIG.model}`, { stdio: 'inherit' });
+    } catch {
+      console.error(`❌ Could not download model ${CONFIG.model}`);
+      process.exit(1);
+    }
+  }
+
+  // Initialize project if necessary
+  if (!await FileManager.exists('CLAUDE.md') && !await FileManager.exists('README.md')) {
+    console.log('💡 Tip: Create a CLAUDE.md or README.md file to provide project context');
+  }
+
+  // Start CLI
+  const cli = new InteractiveCLI();
+  cli.start();
+}
+
+// Execute only if this is the main file
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch(error => {
+    console.error('❌ Fatal error:', error);
+    process.exit(1);
   });
 }
 
-startCLI();
+export { AgentCommands, AIEngine, FileManager, AgentState };
+export default InteractiveCLI;
+
+//
