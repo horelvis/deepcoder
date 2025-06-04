@@ -1,0 +1,11 @@
+{
+  "name": "deepcode",
+  "version": "1.0.0",
+  "description": "Agente de Codificación con memoria y contexto largo usando DeepSeek vía Ollama",
+  "bin": {
+    "deepcode": "./bin/deepcode.js"
+  },
+  "type": "module",
+  "author": "HorelvisCastillo",
+  "license": "MIT"
+}

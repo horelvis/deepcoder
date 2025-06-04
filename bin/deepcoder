@@ -1,0 +1,146 @@
+#!/usr/bin/env node
+
+// DeepCode: Local AI assistant using Ollama + DeepSeek with long-context support
+import fs from 'fs';
+import readline from 'readline';
+import { execSync } from 'child_process';
+import path from 'path';
+import os from 'os';
+
+// === Configuration ===
+const ollamaModel = 'deepseek-coder';  // change to 'codellama' or others if needed
+const ollamaHost = process.env.OLLAMA_API_URL || 'http://localhost:11434';
+let sessionHistory = [];  // for long-context memory
+
+// === Helper: Load project context from CLAUDE.md ===
+function loadProjectContext() {
+  const contextPath = path.resolve('CLAUDE.md');
+  return fs.existsSync(contextPath) ? fs.readFileSync(contextPath, 'utf-8') : '';
+}
+
+// === Helper: Build prompt with context + history ===
+function buildPrompt(userInput) {
+  const context = loadProjectContext();
+  const historyText = sessionHistory
+    .map(({ role, content }) => `### ${role.toUpperCase()}\n${content}`)
+    .join('\n\n');
+
+  return `
+# PROJECT CONTEXT
+
+${context}
+
+# CONVERSATION HISTORY
+
+${historyText}
+
+# NEW USER INPUT
+
+${userInput}
+`.trim();
+}
+
+// === Helper: Call Ollama model ===
+function callOllama(prompt) {
+  const fullPrompt = buildPrompt(prompt);
+  try {
+    const output = execSync(`OLLAMA_HOST=${ollamaHost} ollama run ${ollamaModel}`, {
+      input: fullPrompt,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'inherit']
+    });
+
+    sessionHistory.push({ role: 'user', content: prompt });
+    sessionHistory.push({ role: 'assistant', content: output });
+
+    return output;
+  } catch (err) {
+    console.error('❌ Failed to call Ollama:', err.message);
+    return '';
+  }
+}
+
+// === Command: Ask a coding question ===
+function handleAsk(question) {
+  const response = callOllama(question);
+  console.log('\n🤖 DeepCode:\n');
+  console.log(response);
+}
+
+// === Command: Summarize a code file ===
+function handleSummarize(filename) {
+  if (!fs.existsSync(filename)) {
+    console.error(`❌ File not found: ${filename}`);
+    return;
+  }
+  const code = fs.readFileSync(filename, 'utf-8');
+  const prompt = `Please summarize what this code does:\n\n\`\`\`\n${code}\n\`\`\``;
+  const response = callOllama(prompt);
+  console.log('\n📝 Summary:\n');
+  console.log(response);
+}
+
+// === Command: Edit a file using instructions ===
+function handleEdit(filename) {
+  if (!fs.existsSync(filename)) {
+    console.error(`❌ File not found: ${filename}`);
+    return;
+  }
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  rl.question('🛠️ What do you want to change in the file?\n> ', (instruction) => {
+    const originalCode = fs.readFileSync(filename, 'utf-8');
+    const prompt = `Modify the following code according to this instruction: "${instruction}"\n\n\`\`\`js\n${originalCode}\n\`\`\``;
+    const newCode = callOllama(prompt);
+    const backup = `${filename}.bak`;
+
+    fs.writeFileSync(backup, originalCode);
+    fs.writeFileSync(filename, newCode);
+
+    console.log(`✅ File updated. Original saved to ${backup}`);
+    rl.close();
+  });
+}
+
+// === CLI Interactive Mode ===
+function startCLI() {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    prompt: '🧠 deepcode > '
+  });
+
+  console.log('🚀 Welcome to DeepCode (powered by Ollama + DeepSeek)');
+  rl.prompt();
+
+  rl.on('line', (line) => {
+    const [cmd, ...args] = line.trim().split(' ');
+    const argStr = args.join(' ');
+
+    switch (cmd) {
+      case 'ask':
+        handleAsk(argStr);
+        break;
+      case 'summarize':
+        handleSummarize(argStr);
+        break;
+      case 'edit':
+        handleEdit(argStr);
+        break;
+      case 'exit':
+        rl.close();
+        break;
+      default:
+        console.log(`❓ Unknown command: ${cmd}`);
+        console.log('Available commands: ask, summarize [file], edit [file], exit');
+    }
+    rl.prompt();
+  });
+
+  rl.on('close', () => {
+    console.log('\n👋 Goodbye from DeepCode!');
+    process.exit(0);
+  });
+}
+
+startCLI();
