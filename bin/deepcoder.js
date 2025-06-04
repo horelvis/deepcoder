@@ -1,11 +1,11 @@
-// === Initialization ===#!/usr/bin/env node
+#!/usr/bin/env node
 
 /**
- * DeepCode AI Agent - Intelligent coding assistant
+ * DeepCoder AI Agent - Intelligent coding assistant
  * Inspired by Claude Code with advanced capabilities
  */
 
-import fs from 'fs/promises';
+import { promises as fs } from 'fs';
 import path from 'path';
 import readline from 'readline';
 import { execSync, spawn } from 'child_process';
@@ -115,7 +115,7 @@ class FileManager {
           const fullPath = path.join(dirPath, entry.name);
           const relativePath = path.relative(rootPath, fullPath);
           
-          // Filtrar archivos excluidos
+          // Filter excluded files
           if (CONFIG.excludePatterns.some(pattern => 
             relativePath.includes(pattern) || entry.name.match(pattern))) {
             continue;
@@ -133,7 +133,7 @@ class FileManager {
           }
         }
       } catch (error) {
-        // Ignorar directorios sin permisos
+        // Ignore directories without permissions
       }
     }
     
@@ -148,18 +148,21 @@ class AIEngine {
     const { temperature = 0.7, stream = false } = options;
     
     try {
+      // First, verify Ollama is accessible
+      await this.verifyOllamaConnection();
+      
       const fullPrompt = await this.buildContextualPrompt(prompt);
       
-      const command = [
-        'ollama', 'run', CONFIG.model,
-        '--temperature', temperature.toString()
-      ];
-
-      const response = execSync(command.join(' '), {
+      // Use a simpler command format that works reliably
+      const response = execSync(`ollama run ${CONFIG.model}`, {
         input: fullPrompt,
         encoding: 'utf-8',
-        env: { ...process.env, OLLAMA_HOST: CONFIG.ollamaHost },
-        stdio: ['pipe', 'pipe', 'inherit']
+        env: { 
+          ...process.env, 
+          OLLAMA_HOST: CONFIG.ollamaHost 
+        },
+        stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: 30000 // 30 second timeout
       });
 
       agentState.addToHistory('user', prompt);
@@ -167,7 +170,45 @@ class AIEngine {
 
       return response.trim();
     } catch (error) {
-      throw new Error(`Error communicating with Ollama: ${error.message}`);
+      // Enhanced error handling with specific suggestions
+      if (error.message.includes('ECONNREFUSED')) {
+        throw new Error('Ollama service is not running. Start it with: ollama serve');
+      } else if (error.message.includes('model') && error.message.includes('not found')) {
+        throw new Error(`Model "${CONFIG.model}" not found. Download it with: ollama pull ${CONFIG.model}`);
+      } else if (error.message.includes('timeout')) {
+        throw new Error('Ollama request timed out. The model might be loading or the query is too complex.');
+      } else {
+        throw new Error(`Error communicating with Ollama: ${error.message}\n\nTroubleshooting:\n1. Check if Ollama is running: ollama list\n2. Verify model exists: ollama pull ${CONFIG.model}\n3. Test manually: ollama run ${CONFIG.model} "test"`);
+      }
+    }
+  }
+
+  static async verifyOllamaConnection() {
+    try {
+      // Test if Ollama service is running
+      execSync('curl -s http://localhost:11434/api/version', { 
+        stdio: 'ignore',
+        timeout: 5000 
+      });
+    } catch (error) {
+      throw new Error('Cannot connect to Ollama service. Make sure Ollama is running with: ollama serve');
+    }
+
+    try {
+      // Test if model exists
+      const modelList = execSync('ollama list', { 
+        encoding: 'utf-8',
+        timeout: 5000 
+      });
+      
+      if (!modelList.includes(CONFIG.model)) {
+        throw new Error(`Model "${CONFIG.model}" not found. Download it with: ollama pull ${CONFIG.model}`);
+      }
+    } catch (error) {
+      if (error.message.includes('Model')) {
+        throw error; // Re-throw model not found errors
+      }
+      throw new Error('Cannot verify Ollama models. Make sure Ollama is properly installed.');
     }
   }
 
@@ -212,7 +253,7 @@ You are an expert AI coding agent. Respond concisely and practically.
   }
 
   static async getRelevantFileContext(userInput) {
-    // Identificar archivos mencionados en la entrada del usuario
+    // Identify files mentioned in user input
     const mentionedFiles = await this.extractFileReferences(userInput);
     let context = '';
     
@@ -240,7 +281,7 @@ class AgentCommands {
       console.log('🤔 Processing your question...\n');
       const response = await AIEngine.callOllama(question);
       
-      console.log('🤖 DeepCode AI:\n');
+      console.log('🤖 DeepCoder AI:\n');
       console.log(response);
       console.log('\n' + '─'.repeat(50) + '\n');
     } catch (error) {
@@ -382,7 +423,7 @@ Respond ONLY with the file code, without additional explanations.`;
 
   static showHelp() {
     console.log(`
-🧠 DeepCode AI - Available Commands:
+🧠 DeepCoder AI - Available Commands:
 
 📝 BASIC
   ask <question>              - Ask a question about code
@@ -417,7 +458,7 @@ class InteractiveCLI {
     this.rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
-      prompt: '🧠 deepcode > '
+      prompt: '🧠 deepcoder > '
     });
     
     this.setupHandlers();
@@ -436,13 +477,13 @@ class InteractiveCLI {
     });
 
     this.rl.on('close', () => {
-      console.log('\n👋 Goodbye! DeepCode AI signing off.');
+      console.log('\n👋 Goodbye! DeepCoder AI signing off.');
       process.exit(0);
     });
 
     // Handle Ctrl+C gracefully
     process.on('SIGINT', () => {
-      console.log('\n\n⚠️ Closing DeepCode AI...');
+      console.log('\n\n⚠️ Closing DeepCoder AI...');
       this.rl.close();
     });
   }
@@ -536,7 +577,7 @@ class InteractiveCLI {
 
   showWelcome() {
     console.log(`
-🚀 Welcome to DeepCode AI
+🚀 Welcome to DeepCoder AI
    Intelligent coding agent with Ollama + ${CONFIG.model}
 
 💡 Type "help" to see available commands
@@ -553,32 +594,94 @@ class InteractiveCLI {
 
 // === Initialization ===
 async function main() {
-  // Verify that Ollama is available
+  console.log('🧠 Starting DeepCoder AI...\n');
+
+  // Enhanced Ollama verification
   try {
+    console.log('🔍 Checking Ollama installation...');
     execSync('ollama --version', { stdio: 'ignore' });
+    console.log('✅ Ollama is installed');
   } catch {
     console.error('❌ Ollama is not installed or not in PATH');
-    console.error('   Install Ollama from: https://ollama.ai');
+    console.error('📥 Install Ollama from: https://ollama.ai');
+    console.error('🔧 Or run: curl -fsSL https://ollama.ai/install.sh | sh');
+    process.exit(1);
+  }
+
+  // Check if Ollama service is running
+  try {
+    console.log('🔍 Checking Ollama service...');
+    execSync('curl -s http://localhost:11434/api/version', { 
+      stdio: 'ignore',
+      timeout: 5000 
+    });
+    console.log('✅ Ollama service is running');
+  } catch {
+    console.error('❌ Ollama service is not running');
+    console.error('🚀 Start Ollama with: ollama serve');
+    console.error('💡 Run it in another terminal and try again');
     process.exit(1);
   }
 
   // Verify that the model is available
   try {
-    execSync(`ollama list | grep ${CONFIG.model}`, { stdio: 'ignore' });
-  } catch {
-    console.log(`⬇️ Downloading model ${CONFIG.model}...`);
-    try {
-      execSync(`ollama pull ${CONFIG.model}`, { stdio: 'inherit' });
-    } catch {
-      console.error(`❌ Could not download model ${CONFIG.model}`);
-      process.exit(1);
+    console.log(`🔍 Checking model: ${CONFIG.model}...`);
+    const modelList = execSync('ollama list', { encoding: 'utf-8', timeout: 10000 });
+    
+    if (modelList.includes(CONFIG.model)) {
+      console.log(`✅ Model ${CONFIG.model} is available`);
+    } else {
+      console.log(`📥 Model ${CONFIG.model} not found, downloading...`);
+      console.log('⏳ This may take several minutes...');
+      
+      try {
+        execSync(`ollama pull ${CONFIG.model}`, { 
+          stdio: 'inherit',
+          timeout: 300000 // 5 minutes timeout for download
+        });
+        console.log(`✅ Model ${CONFIG.model} downloaded successfully`);
+      } catch (downloadError) {
+        console.error(`❌ Failed to download model ${CONFIG.model}`);
+        console.error('🔄 Alternative options:');
+        console.error('   • Try a smaller model: export DEEPCODE_MODEL="codellama:7b"');
+        console.error('   • Check your internet connection');
+        console.error('   • Manually run: ollama pull deepseek-coder');
+        process.exit(1);
+      }
     }
+  } catch (error) {
+    console.error('❌ Error checking models:', error.message);
+    console.error('🔧 Try running: ollama list');
+    process.exit(1);
+  }
+
+  // Test the model with a simple query
+  try {
+    console.log('🧪 Testing model response...');
+    const testResponse = execSync(`ollama run ${CONFIG.model}`, {
+      input: 'Say "Hello from DeepCoder AI" and nothing else.',
+      encoding: 'utf-8',
+      timeout: 15000,
+      stdio: ['pipe', 'pipe', 'ignore']
+    });
+    
+    if (testResponse.trim()) {
+      console.log('✅ Model is responding correctly');
+    } else {
+      throw new Error('Model returned empty response');
+    }
+  } catch (error) {
+    console.error('❌ Model test failed:', error.message);
+    console.error('🔧 Try manually: ollama run ' + CONFIG.model);
+    process.exit(1);
   }
 
   // Initialize project if necessary
   if (!await FileManager.exists('CLAUDE.md') && !await FileManager.exists('README.md')) {
     console.log('💡 Tip: Create a CLAUDE.md or README.md file to provide project context');
   }
+
+  console.log('🎉 All systems ready!\n');
 
   // Start CLI
   const cli = new InteractiveCLI();
@@ -594,6 +697,3 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 }
 
 export { AgentCommands, AIEngine, FileManager, AgentState };
-export default InteractiveCLI;
-
-//

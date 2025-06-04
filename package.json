@@ -1,11 +1,38 @@
 {
-  "name": "deepcode",
+  "name": "deepcoder-ai",
   "version": "1.0.0",
-  "description": "Agente de Codificación con memoria y contexto largo usando DeepSeek vía Ollama",
-  "bin": {
-    "deepcode": "./bin/deepcode.js"
-  },
+  "description": "Intelligent coding agent powered by Ollama + DeepSeek",
   "type": "module",
-  "author": "HorelvisCastillo",
-  "license": "MIT"
+  "main": "bin/deepcoder",
+  "bin": {
+    "deepcoder": "./bin/deepcoder"
+  },
+  "scripts": {
+    "start": "node bin/deepcoder",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "ai",
+    "coding",
+    "assistant",
+    "agent",
+    "ollama",
+    "deepseek",
+    "cli"
+  ],
+  "author": "DeepCoder AI Team",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {},
+  "devDependencies": {},
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/horelvis/deepcoder.git"
+  },
+  "bugs": {
+    "url": "https://github.com/horelvis/deepcoder/issues"
+  },
+  "homepage": "https://github.com/horelvis/deepcoder#readme"
 }

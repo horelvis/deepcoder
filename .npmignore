@@ -1,0 +1,41 @@
+# Development files
+.git
+.gitignore
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test files
+test/
+tests/
+__tests__/
+*.test.js
+*.spec.js
+
+# Scripts not needed in package
+install-global.sh
+debug-npm-link.sh
+fix-deepcoder.sh
+diagnose.sh
+prepare-for-npm.sh
+
+# Local configuration
+.env
+.env.local
+.env.*.local
+
+# Temporary files
+tmp/
+temp/
+*.tmp
